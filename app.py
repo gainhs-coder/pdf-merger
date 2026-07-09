@@ -1,8 +1,7 @@
 import io
 
-import fitz
+import fitz  # PyMuPDF
 import streamlit as st
-from pypdf import PdfWriter
 
 
 st.set_page_config(page_title="PDF 합치기", page_icon="📄")
@@ -12,56 +11,40 @@ def format_size(size_bytes):
     return f"{size_bytes / 1024 / 1024:.2f} MB"
 
 
-def merge_pdfs(uploaded_files):
-    writer = PdfWriter()
+def merge_and_optimize_pdfs(uploaded_files):
+    merged_doc = fitz.open()
 
-    for file in uploaded_files:
-        file.seek(0)
-        writer.append(file)
+    for uploaded_file in uploaded_files:
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+        src_doc = fitz.open(stream=file_bytes, filetype="pdf")
+        merged_doc.insert_pdf(src_doc)
+        src_doc.close()
 
-    output = io.BytesIO()
-    writer.write(output)
-    writer.close()
-    output.seek(0)
-    return output
+    normal_output = io.BytesIO()
+    merged_doc.save(normal_output)
+    normal_output.seek(0)
 
-
-def compress_pdf(pdf_bytes, level):
-    if level == "없음":
-        return pdf_bytes
-
-    doc = fitz.open(stream=pdf_bytes.getvalue(), filetype="pdf")
-    result = io.BytesIO()
-
-    if level == "보통":
-        zoom = 1.4
-        jpeg_quality = 70
-    else:
-        zoom = 1.0
-        jpeg_quality = 45
-
-    new_doc = fitz.open()
-
-    for page in doc:
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        img_pdf = fitz.open("pdf", pix.pdfocr_tobytes(compress=True))
-        new_doc.insert_pdf(img_pdf)
-
-    new_doc.save(
-        result,
+    optimized_output = io.BytesIO()
+    merged_doc.save(
+        optimized_output,
         garbage=4,
         deflate=True,
         clean=True,
     )
+    optimized_output.seek(0)
 
-    new_doc.close()
-    doc.close()
-    result.seek(0)
-    return result
+    merged_doc.close()
+
+    # 최적화했는데 오히려 커지는 PDF도 있어서, 그런 경우에는 기본 병합본을 사용합니다.
+    if len(optimized_output.getvalue()) < len(normal_output.getvalue()):
+        return optimized_output
+
+    return normal_output
 
 
-st.title("PDF 합치기")
-st.write("PDF 파일을 올린 순서대로 합치고, 용량도 줄일 수 있습니다.")
+st.title("PDF 합치기 + 용량 줄이기")
+st.write("PDF 파일을 올린 순서대로 합치고, 글자 품질을 최대한 유지하면서 용량을 줄입니다.")
 
 uploaded_files = st.file_uploader(
     "합칠 PDF 파일을 순서대로 올려주세요.",
@@ -69,26 +52,12 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-compression_level = st.radio(
-    "용량 줄이기",
-    ["없음", "보통", "강하게"],
-    index=1,
-    horizontal=True,
-)
-
-if compression_level == "없음":
-    st.caption("압축 없이 그대로 합칩니다.")
-elif compression_level == "보통":
-    st.caption("추천: 품질을 어느 정도 유지하면서 용량을 줄입니다.")
-else:
-    st.caption("용량을 더 많이 줄입니다. 대신 글자나 이미지가 조금 흐려질 수 있습니다.")
-
 if uploaded_files:
     st.subheader("업로드된 순서")
-    for index, file in enumerate(uploaded_files, start=1):
-        st.write(f"{index}. {file.name} - {format_size(file.size)}")
+    for index, uploaded_file in enumerate(uploaded_files, start=1):
+        st.write(f"{index}. {uploaded_file.name} - {format_size(uploaded_file.size)}")
 
-    original_size = sum(file.size for file in uploaded_files)
+    original_size = sum(uploaded_file.size for uploaded_file in uploaded_files)
     st.info(f"원본 총 용량: {format_size(original_size)}")
 
     if len(uploaded_files) < 2:
@@ -96,9 +65,8 @@ if uploaded_files:
     else:
         if st.button("PDF 만들기"):
             try:
-                with st.spinner("PDF를 만들고 있습니다..."):
-                    merged_pdf = merge_pdfs(uploaded_files)
-                    result_pdf = compress_pdf(merged_pdf, compression_level)
+                with st.spinner("PDF를 합치고 용량을 줄이는 중입니다..."):
+                    result_pdf = merge_and_optimize_pdfs(uploaded_files)
 
                 result_size = len(result_pdf.getvalue())
 
@@ -112,15 +80,14 @@ if uploaded_files:
                     reduction = (1 - result_size / original_size) * 100
                     col3.metric("감소율", f"{reduction:.1f}%")
 
-                file_name = "merged.pdf" if compression_level == "없음" else "merged_compressed.pdf"
-
                 st.download_button(
                     label="PDF 다운로드",
                     data=result_pdf,
-                    file_name=file_name,
+                    file_name="merged_compressed.pdf",
                     mime="application/pdf",
                 )
 
             except Exception as e:
                 st.error("PDF를 만드는 중 오류가 발생했습니다.")
+                st.write("비밀번호가 걸린 PDF이거나 손상된 PDF가 포함되어 있을 수 있습니다.")
                 st.exception(e)
